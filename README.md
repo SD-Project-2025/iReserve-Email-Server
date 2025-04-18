@@ -2,7 +2,6 @@
 
 [![codecov](https://codecov.io/gh/SD-Project-2025/iReserve-Email-Server/branch/main/graph/badge.svg)](https://codecov.io/gh/SD-Project-2025/iReserve-Email-Server)
 
-
 # 📧 iReserve Email Server
 
 A RESTful API for sending individual and broadcast emails using SMTP and PostgreSQL.  
