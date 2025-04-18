@@ -45,10 +45,8 @@ jobs:
           name: coverage-report
           path: htmlcov/
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          files: coverage.xml
-          flags: unittests
-          name: codecov-coverage
-        
+          token: ${{ secrets.CODECOV_TOKEN }}  # Set your token in the GitHub Secrets
+          slug: SD-Project-2025/iReserve-Email-Server
