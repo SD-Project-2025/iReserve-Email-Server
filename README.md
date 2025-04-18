@@ -1,6 +1,6 @@
 # iReserve Email Server
 
-![Coverage](https://github.com/DimakatsoMatlaila/iReserve-Email-Server/actions/workflows/main.yml/badge.svg)
+[![codecov](https://codecov.io/gh/DimakatsoMatlaila/iReserve-Email-Server/branch/main/graph/badge.svg)](https://codecov.io/gh/DimakatsoMatlaila/iReserve-Email-Server)
 
 # 📧 iReserve Email Server
 
