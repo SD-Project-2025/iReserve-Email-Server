@@ -1,3 +1,7 @@
+# iReserve Email Server
+
+![Coverage](https://github.com/DimakatsoMatlaila/iReserve-Email-Server/actions/workflows/main.yml/badge.svg)
+
 # 📧 iReserve Email Server
 
 A RESTful API for sending individual and broadcast emails using SMTP and PostgreSQL.  
