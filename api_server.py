@@ -7,6 +7,8 @@ import smtplib
 import psycopg2
 from psycopg2 import sql
 from typing import Tuple, List
+from flask_cors import CORS
+
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +24,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Flask app and API setup
 app = Flask(__name__)
+CORS(app)
+@app.after_request
+def add_cors_headers(response):
+    if request.method == "POST":
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
 api = Api(app,
           version="1.0",
           title="iReserve Email API",
@@ -212,6 +221,7 @@ class BroadcastEmail(Resource):
     def post(self):
         """Send broadcast emails to selected group"""
         data = request.json
+        
 
         if not all(key in data for key in ['subject', 'message', 'recipient_type']):
             return {"status": "error", "message": "Missing required fields"}, 400
