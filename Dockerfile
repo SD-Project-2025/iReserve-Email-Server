@@ -17,8 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 3000
 
 # Set environment variables for Flask
-ENV FLASK_APP=app.py
+ENV FLASK_APP=api_server.py
 ENV FLASK_ENV=production
 
 # Run the Flask app when the container starts (in production mode)
-CMD ["python", "app.py"]
+CMD ["python", "api_server.py"]
