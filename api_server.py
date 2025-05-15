@@ -8,7 +8,9 @@ import psycopg2
 from psycopg2 import sql
 from typing import Tuple, List
 from flask_cors import CORS
-
+from datetime import datetime
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 
 # Load environment variables
 load_dotenv()
@@ -21,8 +23,13 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
 FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER)
 FROM_NAME = os.getenv("FROM_NAME", "iReserve System")
 DATABASE_URL = os.getenv("DATABASE_URL")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 
-# Flask app and API setup
+
+if not ENCRYPTION_KEY or len(ENCRYPTION_KEY) != 32:
+    raise ValueError("Invalid ENCRYPTION_KEY - must be 32 characters long")
+
+
 app = Flask(__name__)
 CORS(app)
 @app.after_request
@@ -31,15 +38,16 @@ def add_cors_headers(response):
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
+
 api = Api(app,
           version="1.0",
           title="iReserve Email API",
-          description="API for sending individual and broadcast emails",
+          description="API for sending individual, broadcast emails and booking reminders",
           doc="/swagger/")
 
 ns = Namespace('emails', description='Email operations')
 
-# Models for Swagger
+
 email_request_model = api.model('EmailRequest', {
     'client_name': fields.String(required=True, example="John Doe"),
     'client_email': fields.String(required=True, example="client@example.com"),
@@ -57,6 +65,16 @@ broadcast_model = api.model('BroadcastRequest', {
                                     example="RESIDENTS")
 })
 
+booking_reminder_response = api.model('BookingReminderResponse', {
+    'status': fields.String(example="success"),
+    'messages_sent': fields.Integer(example=3),
+    'total_bookings': fields.Integer(example=5),
+    'details': fields.List(fields.String, example=[
+        "Email sent to john@example.com for 2 bookings",
+        "No bookings found for mary@example.com"
+    ])
+})
+
 success_response_model = api.model('SuccessResponse', {
     'status': fields.String(example="success"),
     'message': fields.String(example="Email sent successfully")
@@ -68,12 +86,40 @@ error_response_model = api.model('ErrorResponse', {
     'error': fields.String(example="SMTP authentication failed")
 })
 
-# Utility functions
+
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
+def decrypt_email(encrypted_text: str) -> str:
+    """Decrypt AES-256-CBC encrypted email addresses"""
+    try:
+        iv_hex, ciphertext_hex = encrypted_text.split(':', 1)
+        iv = bytes.fromhex(iv_hex)
+        ciphertext = bytes.fromhex(ciphertext_hex)
+        
+        cipher = AES.new(ENCRYPTION_KEY.encode('utf-8'), AES.MODE_CBC, iv)
+        decrypted_bytes = unpad(cipher.decrypt(ciphertext), AES.block_size)
+        return decrypted_bytes.decode('utf-8')
+    except Exception as e:
+        raise ValueError(f"Decryption failed: {str(e)}")
+
+def process_email(email: str) -> str:
+    """Decrypt email if encrypted (no @ present)"""
+    if not email:
+        return email
+    if '@' not in email:
+        try:
+            return decrypt_email(email)
+        except Exception as e:
+            print(f"Decryption error for {email}: {str(e)}")
+            return email
+    return email
+
 def send_email(to_email: str, subject: str, html_body: str, reply_to=None, cc=None) -> Tuple[bool, str]:
     try:
+        if not to_email or '@' not in to_email:
+            return False, "Invalid email address"
+
         msg = EmailMessage()
         msg["From"] = f"{FROM_NAME} <{FROM_EMAIL}>"
         msg["To"] = to_email
@@ -99,6 +145,7 @@ def get_recipient_emails(recipient_type: str) -> List[str]:
     conn = get_db_connection()
     cur = conn.cursor()
 
+   
     if recipient_type == "ALL":
         query = """
             SELECT r.email FROM residents r
@@ -121,13 +168,13 @@ def get_recipient_emails(recipient_type: str) -> List[str]:
         """
 
     cur.execute(query)
-    emails = [row[0] for row in cur.fetchall()]
+    raw_emails = [row[0] for row in cur.fetchall() if row[0]]
+    emails = [process_email(email) for email in raw_emails]
     cur.close()
     conn.close()
+    return [email for email in emails if '@' in email]  
 
-    return emails
-
-def generate_email_html(message: str) -> str:
+def generate_email_html(message: str, name: str = "User") -> str:
     return f"""
     <!DOCTYPE html>
     <html>
@@ -138,6 +185,8 @@ def generate_email_html(message: str) -> str:
             .header {{ background-color: #2563eb; color: white; padding: 20px; text-align: center; }}
             .content {{ padding: 20px; background-color: #ffffff; }}
             .footer {{ margin-top: 20px; font-size: 0.8em; color: #666; text-align: center; }}
+            ul {{ list-style-type: none; padding: 0; }}
+            li {{ margin-bottom: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 4px; }}
         </style>
     </head>
     <body>
@@ -146,8 +195,8 @@ def generate_email_html(message: str) -> str:
                 <h2>iReserve System Notification</h2>
             </div>
             <div class="content">
-                <p>Dear User,</p>
-                <p>{message}</p>
+                <p>Dear {name},</p>
+                {message}
                 <p>Best regards,<br>The iReserve Team</p>
             </div>
             <div class="footer">
@@ -158,7 +207,7 @@ def generate_email_html(message: str) -> str:
     </html>
     """
 
-# Routes
+
 @ns.route('/send')
 class EmailSender(Resource):
     @api.doc('send_email')
@@ -173,6 +222,11 @@ class EmailSender(Resource):
         required_fields = ['client_name', 'client_email', 'recipient_email', 'subject', 'message']
         if not all(field in data for field in required_fields):
             return {'status': 'error', 'message': 'Missing required fields'}, 400
+
+        # Process recipient email
+        processed_email = process_email(data['recipient_email'])
+        if '@' not in processed_email:
+            return {'status': 'error', 'message': 'Invalid recipient email'}, 400
 
         html_content = f"""
         <html>
@@ -203,7 +257,7 @@ class EmailSender(Resource):
         """
 
         success, error = send_email(
-            to_email=data['recipient_email'],
+            to_email=processed_email,
             subject=data['subject'],
             html_body=html_content,
             reply_to=data['client_email'],
@@ -217,11 +271,14 @@ class EmailSender(Resource):
 
 @ns.route('/broadcast')
 class BroadcastEmail(Resource):
+    @api.doc('send_broadcast_email')
     @api.expect(broadcast_model)
+    @api.response(200, 'Success', success_response_model)
+    @api.response(400, 'Validation Error', error_response_model)
+    @api.response(500, 'Server Error', error_response_model)
     def post(self):
         """Send broadcast emails to selected group"""
         data = request.json
-        
 
         if not all(key in data for key in ['subject', 'message', 'recipient_type']):
             return {"status": "error", "message": "Missing required fields"}, 400
@@ -229,7 +286,7 @@ class BroadcastEmail(Resource):
         try:
             emails = get_recipient_emails(data['recipient_type'])
             if not emails:
-                return {"status": "error", "message": "No recipients found"}, 404
+                return {"status": "error", "message": "No valid recipients found"}, 404
         except Exception as e:
             return {"status": "error", "message": f"Database error: {str(e)}"}, 500
 
@@ -250,8 +307,121 @@ class BroadcastEmail(Resource):
             "results": results
         }, 200
 
-# Register namespace
+@ns.route('/send-booking-reminders')
+class BookingReminder(Resource):
+    @api.doc('send_booking_reminders',
+             description='Send reminder emails for bookings starting in the next 24 hours.')
+    @api.response(200, 'Success', booking_reminder_response)
+    @api.response(500, 'Server Error', error_response_model)
+    def post(self):
+        """Send reminder emails for bookings starting in the next 24 hours"""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+          
+            query = """
+                SELECT 
+                    r.resident_id,
+                    r.email,
+                    r.name,
+                    b.booking_id,
+                    b.start_time,
+                    f.name as facility_name
+                FROM 
+                    bookings b
+                JOIN 
+                    residents r ON b.resident_id = r.resident_id
+                JOIN 
+                    facilities f ON b.facility_id = f.facility_id
+                WHERE 
+                   b.start_time BETWEEN NOW()::time AND (NOW() + INTERVAL '24 hours')::time
+                ORDER BY 
+                    r.email, b.start_time
+            """
+            
+            cur.execute(query)
+            bookings_data = cur.fetchall()
+            total_bookings = len(bookings_data)
+            
+            if not bookings_data:
+                return {
+                    'status': 'success',
+                    'messages_sent': 0,
+                    'total_bookings': 0,
+                    'details': ['No bookings starting in the next 24 hours found']
+                }, 200
+            
+            bookings_by_email = {}
+            for booking in bookings_data:
+                resident_id, email, name, booking_id, start_time, facility_name = booking
+                # Decrypt and validate email
+                clean_email = process_email(email)
+                if '@' not in clean_email:
+                    continue
+                
+                if clean_email not in bookings_by_email:
+                    bookings_by_email[clean_email] = {
+                        'name': name,
+                        'bookings': []
+                    }
+                bookings_by_email[clean_email]['bookings'].append({
+                    'facility_name': facility_name,
+                    'start_time': start_time.strftime('%Y-%m-%d %H:%M')
+                })
+            
+            results = []
+            emails_sent = 0
+            
+            for email, data in bookings_by_email.items():
+                name = data['name']
+                bookings = data['bookings']
+                booking_count = len(bookings)
+                
+                subject = f"Reminder: You have {booking_count} upcoming booking(s)"
+                bookings_html = "<ul>" + "".join(
+                    f"<li><strong>{b['facility_name']}</strong> at {b['start_time']}</li>"
+                    for b in bookings
+                ) + "</ul>"
+                
+                message = f"""
+                <p>This is a reminder for your upcoming booking(s):</p>
+                {bookings_html}
+                <p>Please arrive on time for your booking(s).</p>
+                <p>You can view all your bookings in the iReserve system.</p>
+                """
+                
+                html_content = generate_email_html(message, name)
+                success, error = send_email(email, subject, html_content)
+                
+                if success:
+                    emails_sent += 1
+                    results.append(f"Reminder sent to {email} for {booking_count} booking(s)")
+                else:
+                    results.append(f"Failed to send reminder to {email}: {error}")
+            
+            return {
+                'status': 'success',
+                'messages_sent': emails_sent,
+                'total_bookings': total_bookings,
+                'details': results
+            }, 200
+            
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f'Failed to process booking reminders: {str(e)}'
+            }, 500
+        finally:
+            if 'cur' in locals():
+                cur.close()
+            if 'conn' in locals():
+                conn.close()
+
+
+
 api.add_namespace(ns)
-Port = os.getenv("PORT")
+
 if __name__ == '__main__':
+    Port = os.getenv("PORT", 5000)
     app.run(debug=True, host='0.0.0.0', port=Port)
