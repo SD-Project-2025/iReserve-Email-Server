@@ -26,10 +26,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 
 
-if not ENCRYPTION_KEY or len(ENCRYPTION_KEY) != 32:
-    raise ValueError("Invalid ENCRYPTION_KEY - must be 32 characters long")
-
-
 app = Flask(__name__)
 CORS(app)
 @app.after_request
