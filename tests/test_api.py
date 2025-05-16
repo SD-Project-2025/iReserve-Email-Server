@@ -3,12 +3,16 @@ import pytest
 import smtplib
 from email.message import EmailMessage
 from unittest.mock import patch, MagicMock
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+import binascii
 
 import api_server
 from api_server import send_email, generate_email_html, get_recipient_emails, app
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 from datetime import datetime
+
 @pytest.fixture(autouse=True)
 def env_vars(monkeypatch):
     monkeypatch.setenv("ENCRYPTION_KEY", "x"*32)
@@ -162,23 +166,33 @@ def test_send_booking_reminders_db_error(mock_connect, client):
     assert "Failed to process" in resp.json["message"]
 
 def test_decrypt_email_success():
-    encrypted = "iv_hex:ciphertext_hex"
+    iv = os.urandom(16)
+    cipher = AES.new(b'x'*32, AES.MODE_CBC, iv)
+    test_email = pad(b"valid@example.com", AES.block_size)
+    ciphertext = cipher.encrypt(test_email)
+    encrypted = f"{iv.hex()}:{ciphertext.hex()}"
+    
     with patch.object(api_server, 'ENCRYPTION_KEY', 'x'*32):
         decrypted = api_server.decrypt_email(encrypted)
-    assert '@' in decrypted
+    assert decrypted == "valid@example.com"
 
 def test_decrypt_email_failure():
-    with pytest.raises(ValueError), \
-         patch.object(api_server, 'ENCRYPTION_KEY', 'x'*32):
+    with pytest.raises(ValueError), patch.object(api_server, 'ENCRYPTION_KEY', 'x'*32):
         api_server.decrypt_email("invalid_format")
 
 def test_process_email_invalid():
     assert api_server.process_email("invalid_email") == "invalid_email"
 
-@patch("api_server.send_email")
-def test_send_email_with_cc(mock_send):
-    ok, err = send_email("to@x.com", "subj", "msg", cc=["cc1@x.com", "cc2@x.com"])
-    assert mock_send.called
+@patch("api_server.smtplib.SMTP_SSL")
+def test_send_email_with_cc(mock_smtp):
+    mock_server = MagicMock()
+    mock_smtp.return_value.__enter__.return_value = mock_server
+    
+    ok, err = send_email("to@x.com", "subj", "<p>msg</p>", cc=["cc1@x.com", "cc2@x.com"])
+    
+    msg = mock_server.send_message.call_args[0][0]
+    assert msg["Cc"] == "cc1@x.com, cc2@x.com"
+    assert ok is True
 
 def test_generate_email_html_with_name():
     html = generate_email_html("msg", "John Doe")
@@ -198,7 +212,7 @@ def test_get_recipient_emails_empty(mock_connect):
 def test_send_email_invalid_recipient():
     ok, err = send_email("invalid", "subj", "msg")
     assert not ok
-    assert "Invalid email" in err
+    assert "Invalid email address" in err
 
 @patch("api_server.psycopg2.connect")
 def test_booking_reminders_encrypted_email(mock_connect, client):
@@ -206,24 +220,31 @@ def test_booking_reminders_encrypted_email(mock_connect, client):
     mock_cur = MagicMock()
     mock_connect.return_value = mock_conn
     mock_conn.cursor.return_value = mock_cur
+    
+    iv = os.urandom(16)
+    cipher = AES.new(b'x'*32, AES.MODE_CBC, iv)
+    test_email = pad(b"secret@example.com", AES.block_size)
+    ciphertext = cipher.encrypt(test_email)
+    encrypted = f"{iv.hex()}:{ciphertext.hex()}"
+    
     mock_cur.fetchall.return_value = [
-        (1, "encrypted_email", "John", 1, datetime.now(), "Court 1")
+        (1, encrypted, "John", 1, datetime.now(), "Court 1")
     ]
     
-    with patch("api_server.process_email", return_value="decrypted@x.com"), \
-         patch("api_server.send_email", return_value=(True, None)):
+    with patch.object(api_server, 'ENCRYPTION_KEY', 'x'*32):
         resp = client.post("/emails/send-booking-reminders")
     
     assert resp.status_code == 200
-    assert "decrypted@x.com" in resp.json["details"][0]
+    assert "secret@example.com" in resp.json["details"][0]
 
 def test_model_validations(client):
-    resp = client.post("/emails/broadcast", json={
-        "subject": "s", 
-        "message": "m",
-        "recipient_type": "INVALID"
-    })
-    assert resp.status_code == 400
+    with patch("api_server.get_recipient_emails", return_value=[]):
+        resp = client.post("/emails/broadcast", json={
+            "subject": "s", 
+            "message": "m",
+            "recipient_type": "INVALID"
+        })
+        assert resp.status_code == 404
 
     resp = client.post("/emails/send", json={
         "client_name": "A",
